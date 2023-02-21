@@ -12,13 +12,17 @@ struct RoomManager {
 }
 struct Room {
     cnt: usize,
-    roomSize : usize,
+    startNum: usize,
+    endNum : usize,
 }
 #[derive(Debug)]
 enum RoomMessage {
     Join(String, tokio::sync::mpsc::Sender<RoomMessage>),
-    ClientID(usize,usize,String),
+    ClientID(usize),
+    //room full
+    Rejected(String,usize),
     // Leave,
+    End(),
     Message(String),
     // ChangeManager(tokio::sync::mpsc::Sender<RoomMessage>)
 }
@@ -47,15 +51,19 @@ async fn initialize() {
                 RoomMessage::Join(room_id, tx) => {
                     let mut client_id = 0;
                     let mut authCode: String = String::from("asdf");
-                    let mut roomSize = 0;
                     if let Some(r) = manager.rooms.get_mut(&room_id) {
                         r.cnt += 1;
                         client_id = r.cnt;
+                        if client_id > r.endNum{
+                            tx.send(RoomMessage::Rejected(authCode,client_id.wrapping_sub(r.endNum))).await;
+                            manager.clients.insert((room_id, client_id), tx);
+                            continue;
+                        }
                     } else {
-                        manager.rooms.insert(room_id.clone(), Room { cnt: 1, roomSize: 100 });
+                        manager.rooms.insert(room_id.clone(), Room { cnt: 1, startNum: 1, endNum: 3 });
                         client_id = 1;
                     }
-                    tx.send(RoomMessage::ClientID(client_id,roomSize,authCode)).await;
+                    tx.send(RoomMessage::ClientID(client_id)).await;
                     manager.clients.insert((room_id, client_id), tx);
                 }
                 _ => {}
@@ -65,7 +73,7 @@ async fn initialize() {
 }
 
 async fn listen(tx: Sender<RoomMessage>) {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:33889").await;
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:33889").await;
 
     match listener {
         Ok(s) => loop {
@@ -102,7 +110,7 @@ async fn handle_conn(mut sock: TcpStream, addr: std::net::SocketAddr, tx: Sender
             }
             for h in req.headers {
                 if h.name == "Cookie" {
-                    println!("{:?}", String::from_utf8(h.value.to_vec()));
+                    println!("cookie : {:?}", String::from_utf8(h.value.to_vec()));
                 }
             }
         }
@@ -112,12 +120,17 @@ async fn handle_conn(mut sock: TcpStream, addr: std::net::SocketAddr, tx: Sender
         println!("recv {:?}", rcv);
 
         match rcv {
-            Some(RoomMessage::ClientID(id,roomSize,authCode)) => {
+            Some(RoomMessage::ClientID(id)) => {
                 sock.write_all(format!("HTTP/1.1 200 OK\r\nSet-Cookie: bb\r\n\r\nConnection id: {}", id).as_bytes())
                     .await;
             }
             Some(RoomMessage::Message(msg)) => {
                 sock.write_all(format!("\ndata: {}", msg).as_bytes()).await;
+            }
+            Some(RoomMessage::Rejected(authCode,left)) => {
+                sock.write_all(format!(
+                    "HTTP/1.1 200 OK\r\nSet-Cookie: bb\r\n\r\n: waiting number{} authCode:{}", 
+                    left,authCode).as_bytes()).await;
             }
             _ => {}
         }
